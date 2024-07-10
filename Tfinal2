@@ -1,0 +1,497 @@
+import pandas as pd
+
+import numpy as np
+
+import torch
+
+import torch.nn as nn
+
+import torch.optim as optim
+
+from sklearn.preprocessing import StandardScaler
+
+from torch.utils.data import Dataset, DataLoader
+
+import matplotlib.pyplot as plt
+
+import math
+
+from sklearn.metrics import mean_squared_error
+
+from scipy.stats import pearsonr
+
+
+
+
+
+
+
+# Load the data from GitHub and skip problematic line
+
+url = 'https://github.com/DhruvinP99/Transformer-TSF/raw/main/illinois_data3.csv'
+
+try:
+
+    data = pd.read_csv(url)
+
+except pd.errors.ParserError as e:
+
+    print(f"ParserError: {e}")
+
+
+
+# Display the first few rows to understand the structure of your data
+
+print(data.head())
+
+
+
+
+
+# Example: Assuming 'week' as index and 'UNWEIGHTED ILI' as the target column
+
+# Ensure 'week' is indeed a column in your DataFrame
+
+if ' week' in data.columns:
+
+    data[' week'] = pd.to_datetime(data[' week'])
+
+    data.set_index(' week', inplace=True)
+
+    print("Data after setting 'week' as index:\n", data.head())
+
+else:
+
+    print("Column 'week' not found in the data. Please check the column names.")
+
+
+
+# Print columns again to verify if there are any extra characters in column names
+
+print(data.columns)
+
+
+
+# Remove any leading or trailing whitespace from column names
+
+data.columns = data.columns.str.strip()
+
+
+
+# Replace 'X' with 0 in 'UNWEIGHTED ILI' column
+
+data['UNWEIGHTED ILI'] = data['UNWEIGHTED ILI'].replace('X', 0).astype(float)
+
+
+
+# Normalize the data
+
+scaler = StandardScaler()
+
+data['UNWEIGHTED ILI'] = scaler.fit_transform(data[['UNWEIGHTED ILI']])
+
+
+
+# Prepare sequences function
+
+def create_sequences(data, seq_length):
+
+    xs, ys = [], []
+
+    for i in range(len(data) - seq_length):
+
+        x = data.iloc[i:(i + seq_length)].values
+
+        y = data.iloc[i + seq_length].values
+
+        xs.append(x)
+
+        ys.append(y)
+
+    return np.array(xs), np.array(ys)
+
+
+
+seq_length = 10  # You can adjust this
+
+X, y = create_sequences(data[['UNWEIGHTED ILI']], seq_length)
+
+
+
+# Split the data into training, validation, and test sets
+
+train_size = int(0.7 * len(X))
+
+val_size = int(0.15 * len(X))
+
+test_size = len(X) - train_size - val_size
+
+
+
+X_train, y_train = X[:train_size], y[:train_size]
+
+X_val, y_val = X[train_size:train_size+val_size], y[train_size:train_size+val_size]
+
+X_test, y_test = X[train_size+val_size:], y[train_size+val_size:]
+
+
+
+# Convert to PyTorch tensors
+
+X_train = torch.tensor(X_train, dtype=torch.float32)
+
+y_train = torch.tensor(y_train, dtype=torch.float32)
+
+X_val = torch.tensor(X_val, dtype=torch.float32)
+
+y_val = torch.tensor(y_val, dtype=torch.float32)
+
+X_test = torch.tensor(X_test, dtype=torch.float32)
+
+y_test = torch.tensor(y_test, dtype=torch.float32)
+
+
+
+# Create datasets and dataloaders
+
+class TimeSeriesDataset(Dataset):
+
+    def __init__(self, X, y):
+
+        self.X = X
+
+        self.y = y
+
+
+
+    def __len__(self):
+
+        return len(self.X)
+
+
+
+    def __getitem__(self, idx):
+
+        return self.X[idx], self.y[idx]
+
+
+
+train_dataset = TimeSeriesDataset(X_train, y_train)
+
+val_dataset = TimeSeriesDataset(X_val, y_val)
+
+test_dataset = TimeSeriesDataset(X_test, y_test)
+
+
+
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+
+
+# Positional Encoding class
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+
+        super(PositionalEncoding, self).__init__()
+
+        self.dropout = nn.Dropout(p=dropout)
+
+
+
+        pe = torch.zeros(max_len, d_model)
+
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0).transpose(0, 1)
+
+        self.register_buffer('pe', pe)
+
+
+
+    def forward(self, x):
+
+        x = x + self.pe[:x.size(0), :]
+
+        return self.dropout(x)
+
+
+
+# Transformer model class
+
+class TransformerTimeSeries(nn.Module):
+
+    def __init__(self, input_dim, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout=0.1):
+
+        super(TransformerTimeSeries, self).__init__()
+
+        self.model_type = 'Transformer'
+
+        self.src_mask = None
+
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+
+        self.d_model = d_model
+
+
+
+        self.encoder = nn.Linear(input_dim, d_model)
+
+        self.transformer = nn.Transformer(d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout)
+
+        self.decoder = nn.Linear(d_model, input_dim)  # Ensure the output dimension matches the input dimension
+
+
+
+    def forward(self, src):
+
+        src = self.encoder(src) * math.sqrt(self.d_model)
+
+        src = self.pos_encoder(src)
+
+        output = self.transformer(src, src)
+
+        output = self.decoder(output)
+
+        return output
+
+
+
+# Set hyperparameters
+
+input_dim = 1
+
+d_model = 512
+
+nhead = 8
+
+num_encoder_layers = 3
+
+num_decoder_layers = 3
+
+dim_feedforward = 2048
+
+dropout = 0.1
+
+epochs = 50
+
+
+
+# Initialize the model, loss function, and optimizer
+
+model = TransformerTimeSeries(input_dim, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout)
+
+criterion = nn.MSELoss()
+
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
+
+
+
+# Training loop with validation
+
+train_losses = []
+
+val_losses = []
+
+
+
+for epoch in range(epochs):
+
+    model.train()
+
+    running_loss = 0.0
+
+    
+
+    for inputs, targets in train_dataloader:
+
+        optimizer.zero_grad()
+
+        
+
+        inputs = inputs.permute(1, 0, 2)  # Permute to (seq_length, batch_size, input_dim) for transformer
+
+        outputs = model(inputs)
+
+        
+
+        outputs = outputs.permute(1, 0, 2)  # Permute back to (batch_size, seq_length, input_dim)
+
+        targets = targets.unsqueeze(-1)  # Ensure targets have shape (batch_size, 1)
+
+        
+
+        loss = criterion(outputs[:, -1], targets.squeeze(-1))  # Use only the last prediction for loss calculation
+
+        loss.backward()
+
+        optimizer.step()
+
+        
+
+        running_loss += loss.item()
+
+    
+
+    epoch_loss = running_loss / len(train_dataloader)
+
+    train_losses.append(epoch_loss)
+
+    print(f"Epoch {epoch+1}/{epochs}, Training Loss: {epoch_loss}")
+
+    
+
+    model.eval()
+
+    val_loss = 0.0
+
+    
+
+    with torch.no_grad():
+
+        for inputs, targets in val_dataloader:
+
+            inputs = inputs.permute(1, 0, 2)
+
+            outputs = model(inputs)
+
+            outputs = outputs.permute(1, 0, 2)
+
+            targets = targets.unsqueeze(-1)
+
+            
+
+            val_loss += criterion(outputs[:, -1], targets.squeeze(-1)).item()  # Use only the last prediction for loss calculation
+
+    
+
+    val_loss /= len(val_dataloader)
+
+    val_losses.append(val_loss)
+
+    print(f"Epoch {epoch+1}/{epochs}, Validation Loss: {val_loss}")
+
+
+
+print("Training completed!")
+
+
+
+# Plot training and validation loss
+
+plt.figure(figsize=(10, 5))
+
+plt.plot(range(1, epochs + 1), train_losses, marker='o', label='Training Loss')
+
+plt.plot(range(1, epochs + 1), val_losses, marker='o', label='Validation Loss')
+
+plt.title('Training and Validation Loss Over Epochs')
+
+plt.xlabel('Epoch')
+
+plt.ylabel('Loss')
+
+plt.legend()
+
+plt.grid(True)
+
+plt.show()
+
+
+
+# Evaluate on test set and visualize predictions
+
+model.eval()
+
+test_loss = 0.0
+
+all_targets = []
+
+all_predictions = []
+
+
+
+with torch.no_grad():
+
+    for inputs, targets in test_dataloader:
+
+        inputs = inputs.permute(1, 0, 2)
+
+        outputs = model(inputs)
+
+        outputs = outputs.permute(1, 0, 2)
+
+        targets = targets.unsqueeze(-1)
+
+        
+
+        all_targets.extend(targets.squeeze(-1).tolist())
+
+        all_predictions.extend(outputs[:, -1].squeeze(-1).tolist())
+
+
+
+# Rescale the predictions and targets to their original scale
+
+all_targets = scaler.inverse_transform(np.array(all_targets).reshape(-1, 1)).flatten()
+
+all_predictions = scaler.inverse_transform(np.array(all_predictions).reshape(-1, 1)).flatten()
+
+
+
+# Ensure all_targets and all_predictions have the same length
+
+min_length = min(len(all_targets), len(all_predictions))
+
+all_targets = all_targets[:min_length]
+
+all_predictions = all_predictions[:min_length]
+
+
+
+# Calculate RMSE
+
+rmse = math.sqrt(mean_squared_error(all_targets, all_predictions))
+
+print(f"Root Mean Squared Error (RMSE): {rmse}")
+
+
+
+# Calculate Pearson correlation coefficient
+
+corr, _ = pearsonr(all_targets, all_predictions)
+
+print(f"Pearson Correlation Coefficient: {corr}")
+
+
+
+# Plot the test results
+
+plt.figure(figsize=(10, 5))
+
+plt.plot(all_targets, marker='o', label='True Values')
+
+plt.plot(all_predictions, marker='x', label='Predictions')
+
+plt.title('True Values vs Predictions on Test Set')
+
+plt.xlabel('Time Step')
+
+plt.ylabel('UNWEIGHTED ILI')
+
+plt.legend()
+
+plt.grid(True)
+
+plt.show()
